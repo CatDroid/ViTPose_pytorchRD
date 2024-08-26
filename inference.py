@@ -22,8 +22,7 @@ __all__ = ['inference']
             
             
 @torch.no_grad()
-def inference(img_path: Path, img_size: tuple[int, int],
-              model_cfg: dict, ckpt_path: Path, device: torch.device, save_result: bool=True) -> np.ndarray:
+def inference(img_path: Path, img_size, model_cfg: dict, ckpt_path: Path, device: torch.device, save_result: bool=True) -> np.ndarray:
     
     # Prepare model
     vit_pose = ViTPose(model_cfg)
@@ -34,7 +33,10 @@ def inference(img_path: Path, img_size: tuple[int, int],
         vit_pose.load_state_dict(ckpt['state_dict'])
     else:
         vit_pose.load_state_dict(ckpt)
+
+    vit_pose.eval() # 补充上这个 否则 predict会计算BN dropout之类的  
     vit_pose.to(device)
+    
     print(f">>> Model loaded: {ckpt_path}")
     
     # Prepare input data
@@ -56,26 +58,35 @@ def inference(img_path: Path, img_size: tuple[int, int],
     print(f">>> Output size: {heatmaps.shape} ---> {elapsed_time:.4f} sec. elapsed [{elapsed_time**-1: .1f} fps]\n")    
     
     # points = heatmap2coords(heatmaps=heatmaps, original_resolution=(org_h, org_w))
-    points, prob = keypoints_from_heatmaps(heatmaps=heatmaps, center=np.array([[org_w//2, org_h//2]]), scale=np.array([[org_w, org_h]]),
-                                           unbiased=True, use_udp=True)
+    points, prob = keypoints_from_heatmaps( heatmaps = heatmaps, 
+                                            center   = np.array([[org_w//2, org_h//2]]), 
+                                            scale    = np.array([[org_w, org_h]]),
+                                            unbiased = True, 
+                                            use_udp  = True )
     points = np.concatenate([points[:, :, ::-1], prob], axis=2)
     
     # Visualization 
     if save_result:
         for pid, point in enumerate(points):
             img = np.array(img)[:, :, ::-1] # RGB to BGR for cv2 modules
-            img = draw_points_and_skeleton(img.copy(), point, joints_dict()['coco']['skeleton'], person_index=pid,
-                                           points_color_palette='gist_rainbow', skeleton_color_palette='jet',
-                                           points_palette_samples=10, confidence_threshold=0.4)
-            save_name = img_path.replace(".jpg", "_result.jpg")
-            cv2.imwrite(save_name, img)
+            img = draw_points_and_skeleton(
+                    img.copy(), 
+                    point, 
+                    joints_dict()['coco']['skeleton'], 
+                    person_index=pid,                             
+                    points_color_palette='gist_rainbow', 
+                    skeleton_color_palette='jet',
+                    points_palette_samples=10, 
+                    confidence_threshold=0.4)
+
+            cv2.imwrite("~/work/ViTPose_pytorch/result/inference.png", img)
     
     return points
     
 
 if __name__ == "__main__":
-    from configs.ViTPose_base_coco_256x192 import model as model_cfg
-    from configs.ViTPose_base_coco_256x192 import data_cfg
+    from configs2.ViTPose_huge_coco_256x192 import model as model_cfg
+    from configs2.ViTPose_huge_coco_256x192 import data_cfg
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--image-path', nargs='+', type=str, default='examples/sample.jpg', help='image path(s)')
@@ -83,7 +94,7 @@ if __name__ == "__main__":
     
     CUR_DIR = osp.dirname(__file__)
     # CKPT_PATH = f"{CUR_DIR}/vitpose-b-multi-coco.pth"
-    CKPT_PATH = "/home/jaehyun/workspace/PoseEstimation/ViTPose_pytorch/runs/train/002/epoch010.pth"
+    CKPT_PATH = "~/work/ViTPose_pytorch/vitpose-h-single-coco.pth"
     
     img_size = data_cfg['image_size']
     if type(args.image_path) != list:
