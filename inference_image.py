@@ -321,10 +321,11 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
     for i, image_pred in enumerate(prediction):
 
         # print(f"i = {i} image_pred = {image_pred.shape}") # i = 0 image_pred = torch.Size([8400, 85]) 
-        # image_pred 是一个框 
+        # image_pred 对应 batch中的 一个图片 
 
         # If none are remaining => process next image
         if not image_pred.size(0):
+            # 没有8400的框
             continue
 
         # Get score and class with highest confidence  
@@ -337,24 +338,29 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
 
         # print(f"class_conf = {class_conf.shape},  class_pred = {class_pred.shape}")
         #  class_conf = torch.Size([8400, 1]),  class_pred = torch.Size([8400, 1])
+        # 
+        # 8400个框  '每个框的最大置信度'  和  '取得最大置信度的对应类别'
+        # 
 
         # YOLOX 模型在 "多个尺度" 上进行 "目标检测"，"每个尺度上的特征图" 都会产生 "一定数量的预测边界框"。
         # 这些边界框的数量 取决于 特征图的大小 以及 每个网格单元预测的边界框的数量
 
         # 如果模型在一个 40x40 的特征图上对每个网格单元预测 3 个边界框，那么这个特征图就会产生 40 * 40 * 3 = 4800 个预测边界框
 
+        # '框置信度'和'类别置信度'的乘积 决定, '类别特定的置信度分数'  提高这个可能避免 误判成人 (而不需要改nms的iou_threshold)
+
         conf_mask = (image_pred[:, 4] * class_conf.squeeze() >= conf_thre).squeeze()
         #  image_pred[:, 4] 是 目标(框)的概率  obj_conf
         #  class_conf.squeeze() 是 目标(框)的 最大的类别概率(Top-1)
-        #  目标框 和 类别 两个概率相乘  要高于 阈值  conf_thre
+        #  目标框 和 类别 两个概率相乘  要高于 阈值  conf_thre -----------------过滤掉 置信度不高的框 
         # print(f"conf_mask {conf_mask.shape}, {torch.sum(conf_mask)}") # conf_mask torch.Size([8400]), 34
         
 
         # Detections ordered as (x1, y1, x2, y2, obj_conf, class_conf, class_pred)  输出格式变成了[左上右下:0123 目标置信度:4 类别概率 类别 ]
         detections = torch.cat((image_pred[:, :5], class_conf, class_pred.float()), 1)
-        # print(f"before mask detections = {detections.shape}") # torch.Size([8400, 7])
+        #print(f"before mask detections = {detections.shape}") # torch.Size([8400, 7])
         detections = detections[conf_mask]
-        # print(f"after  mask detections = {detections.shape}") # torch.Size([34, 7]
+        #print(f"after  mask detections = {detections.shape}") # torch.Size([34, 7]
 
 
         if not detections.size(0): # 这里其实代表config_mask len是0?
@@ -385,17 +391,23 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
                 nms_thre,
             )
 
-        #print(f"class_agnostic = {class_agnostic}, nms_out_index = {nms_out_index}") 
-        # class_agnostic = True, nms_out_index = tensor([22,  4, 21, 11], device='cuda:0') # 这个是列表 表示第22,4,21,11的框 是ok的
+        print(f"nms_thre = {nms_thre} class_agnostic = {class_agnostic}, nms_out_index = {nms_out_index}") 
+        # class_agnostic = True, nms_out_index = tensor([22,  4, 21, 11], device='cuda:0') # 这个是列表 表示第 22,4,21,11 的框 是ok的
 
         detections = detections[nms_out_index]
+
+        # 打印保留下来的 框的类别 和 框   detections的格式   (x1, y1, x2, y2, obj_conf, class_conf, class_pred) 
+        print(f"after nms detections  = {detections}")
+
         #print(f"after nms detections = {detections.shape}")  # after nms detections = torch.Size([4, 7])
         # 经过阈值过滤 剩下 34 个框  经过 非极大值抑制 剩下 4个框  (nms 并没有 合并框)
         #print(f"detections = {detections}")
         if output[i] is None:
             output[i] = detections
+            # output[i] 是对应照片i的 可能有多个框  框可能是几个人的 或者其他类别的 
         else:
             output[i] = torch.cat((output[i], detections)) # 如果之前 i 已经有值  就cat起来 ??  现在只有0 
+            #print(f"output[{i}],  shape = {output[i].shape} ")  # 不会出现  batch有两个一定的i?
 
     return output
 
@@ -574,11 +586,19 @@ class Predictor(object):
         img_info["ratio"] = ratio # self.preproc 也是同样缩放的 (yolox推理时候 是等比例缩放过的! 加padding 宽高都是 tsize = 640x640 正方形  )
 
         img, _ = self.preproc(img, None, self.test_size)
+
+        # https://github.com/Megvii-BaseDetection/YOLOX/issues/1492
+        # yoloX用的是BGR cv2.imread返回的 
+        
+        # img 还是BGR 直接保存 跟cv2一致 
+        #cv2.imwrite(f"temp.png", np.transpose(img, (1, 2, 0)))
+
         img = torch.from_numpy(img).unsqueeze(0) # 加上Batch维度 (实际只有一张图片)
         img = img.float()
 
         img = img.to(self.device)
 
+        # 输入只有一个图片 但是加了batch维度  输出会带有batch维度 
         outputs = self.model(img)
 
         # print(f"before postprocess outputs={outputs.shape} ") # before postprocess outputs=torch.Size([1, 8400, 85])
@@ -654,7 +674,8 @@ class Predictor(object):
 
 
             crop_img, crop_box = crop_img_with_faceBox(img.copy(), box, expand_factor = 0.1) 
-            # , expand_factor=0.1 expand_factor 会加黑框 
+            # , expand_factor=0.1 expand_factor 会扩大yolo框 如果超出原图尺寸 会增加黑边 
+            #  expand_factor 是 单独一边 要 增加 height或者width的 百分比   最后的width或者height会增加 w*expand_factor*2 
             #  ratio=192/256 默认参数是按照 vitpose肢体点 推理输入的分辨率的
 
             # crop_img=(920, 690, 3) 原图大小是738x1312 宽已经超出了  为了对齐 192/256
@@ -720,7 +741,34 @@ def image_demo(predictor, path, save_result, vit_pose, device):
         # print(f"image_name = {image_name}") # imge_name是全路径
         outputs, img_info = predictor.inference(image_name) # 这里的crop坐标是缩放后的
 
+        # BGR顺序 
         image_ori = img_info["raw_img"].copy()
+
+
+        # 显示存留框 
+        output = outputs[0]
+        ratio = img_info["ratio"]
+        # output = torch.Size([2, 7]) 2 = 存留的框  7 = (x1, y1, x2, y2, obj_conf, class_conf, class_pred) 
+        for k in range(output.shape[0]):
+            box = output[k]
+            left, top, right, bottom, obj_conf, class_conf, class_pred = box
+            left, top, right, bottom = left/ratio, top/ratio, right/ratio, bottom/ratio  
+            left, top, right, bottom = int(left), int(top), int(right), int(bottom)
+            left_top = (left, top)
+            right_top = (right, top)
+            right_bottom = (right, bottom)
+            left_bottom = (left, bottom)
+            image = image_ori.copy()
+            cv2.line(image, left_top, right_top, (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.line(image, right_top, right_bottom,  (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.line(image, right_bottom, left_bottom,  (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.line(image, left_bottom, left_top,  (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(image, f"obj_conf={int(obj_conf*100)},class_conf={int(class_conf*100)},class_pred={class_pred}", 
+                            (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), thickness=1)
+            cv2.imwrite(f"box_{k}.png", image)
+            
+            
+
 
 
         # if output_video is None:
@@ -728,6 +776,7 @@ def image_demo(predictor, path, save_result, vit_pose, device):
         #     OUTPUT_VIDEO_PATH = "~/work/ViTPose_pytorch/result/visual_pose.mp4"
         #     output_video = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, 30.0, (image_ori.shape[1], image_ori.shape[0])) 
 
+        # outputs[0] 是代表 batch 中的第一个图片 
   
         crop_res = predictor.crop_with_bbox(outputs[0], img_info, predictor.confthre) 
         # postprocess已经 过滤出 目标置信度*类别概率 > confthre
@@ -956,12 +1005,15 @@ def main(exp, args):
     
 
 # 用法: 
-# CUDA_VISIBLE_DEVICES=1 python inference_image.py image
-# -c save_models/yolo/yolox_x.pth 
-# --path ~/work/ViTPose_pytorch/my_test_data/TwoPeople1.png
+# CUDA_VISIBLE_DEVICES=1 python inference_image.py  -c  yolox_x.pth  --path /home/hehanlong/work/ViTPose_pytorch/my_test_data/17-10-2_0001_00006_.png
+# 
+# 
 # 
 if __name__ == "__main__":
     args = make_parser().parse_args()
+
+    args.conf = 0.75
+    args.nms  = 0.45
 
     # 根据名字  获取yolo-x的模型 
     exp = get_exp(args.exp_file, args.name)
@@ -974,10 +1026,28 @@ if __name__ == "__main__":
 
     from configs2.ViTPose_huge_coco_256x192 import model as model_cfg  # 
     from configs2.ViTPose_huge_coco_256x192 import data_cfg
+    # data_cfg 定义了推理宽高 
+    # configs/ViTPose_huge_coco_256x192.py  这个文件定义了模型结构 数据集 
+    # configs2/ViTPose_huge_coco_256x192.py  或者自己新增 一个配置  对应 vitpose-h-single-coco.pth"
 
+    # https://github.com/ViTAE-Transformer/ViTPose?tab=readme-ov-file 
+    # 这里有对应的 config 和 weight 可以下载
+
+    # multi-task traning 是不同的decoder 对应 不同的数据集 ??  这样 最终上线用哪个?? 
+
+    # multi-task training 
+    #   Human datasets (MS COCO, AIC, MPII, CrowdPose) Results on MS COCO val set 的 
+    #   ViTPose-H* ViTPose_huge_coco_256x192.py   对应权重是  vitpose-h-multi-coco.pth
+    #   
+    # single-task training 
+    #   ViTPose-H ViTPose_huge_coco_256x192.py  
+    # 
+    # config是一样的 
+
+    # 但是 Results on MS COCO val set 和 Results on OCHuman test set 是不同的 
 
     # args.ckpt_path = "~/work/ViTPose_pytorch/vitpose-h-multi-coco.pth" # vitpose的模型 
-    args.ckpt_path = "~/work/ViTPose_pytorch/vitpose-h-single-coco.pth"
+    args.ckpt_path = "/home/hehanlong/work/ViTPose_pytorch/vitpose-h-single-coco.pth"
 
     main(exp, args)
     
